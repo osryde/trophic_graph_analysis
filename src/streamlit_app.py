@@ -504,28 +504,126 @@ def get_extinction_by_community(extinct_nodes, partition):
     return community_extinctions
 
 
+def calculate_R_alpha(graph, th, alpha=0.5, strategy='random', simulations=10):
+    """
+    Calcola l'indice R_alpha per una data soglia th e una strategia di rimozione.
+    R_alpha = frazione di estinzioni primarie necessarie per causare alpha% di estinzioni totali.
+    
+    Args:
+        graph: NetworkX graph
+        th: Soglia energetica di estinzione
+        alpha: Percentuale di estinzioni totali da raggiungere (0.0-1.0)
+        strategy: 'random' o 'most' (più connessi per primi)
+        simulations: Numero di simulazioni per media (usato solo con strategy='random')
+    
+    Returns:
+        R_alpha medio
+    """
+    S = len(graph.nodes())
+    target = alpha * S
+    
+    r_alpha_values = []
+    n_simulations = simulations if strategy == 'random' else 1
+    
+    for _ in range(n_simulations):
+        temp_graph = graph.copy()
+        initial_in_degree = {n: graph.in_degree(n, weight='weight') for n in graph.nodes()}
+        
+        # Scegliamo l'ordine di rimozione
+        nodes_to_remove = list(graph.nodes())
+        if strategy == 'most':
+            # Ordine decrescente per numero di link (in + out)
+            nodes_to_remove = sorted(nodes_to_remove, key=lambda x: graph.degree(x), reverse=True)
+        else:
+            random.shuffle(nodes_to_remove)
+        
+        extinct_total = set()
+        primary_count = 0
+        
+        for p_node in nodes_to_remove:
+            if p_node in extinct_total:
+                continue
+            
+            # 1. Estinzione Primaria
+            primary_count += 1
+            extinct_total.add(p_node)
+            if p_node in temp_graph:
+                temp_graph.remove_node(p_node)
+            
+            # 2. Cascata di Estinzioni Secondarie (Logica Energetica)
+            new_extinctions = True
+            while new_extinctions:
+                new_extinctions = False
+                to_remove_secondary = []
+                for node in temp_graph.nodes():
+                    if initial_in_degree[node] > 0:
+                        current_energy = temp_graph.in_degree(node, weight='weight')
+                        # Se l'energia scende sotto la soglia th
+                        if current_energy <= th * initial_in_degree[node]:
+                            to_remove_secondary.append(node)
+                            new_extinctions = True
+                
+                for node in to_remove_secondary:
+                    extinct_total.add(node)
+                    temp_graph.remove_node(node)
+            
+            # Controlliamo se abbiamo raggiunto alpha%
+            if len(extinct_total) >= target:
+                break
+        
+        r_alpha_values.append(primary_count / S)
+    
+    return sum(r_alpha_values) / len(r_alpha_values)
+
+
 def create_robustness_chart(robustness_data):
-    """Create robustness curve chart"""
+    """Create robustness curve chart with R_alpha"""
     df = pd.DataFrame(robustness_data)
     
-    fig = px.line(
-        df, x='threshold', y='avg_extinctions',
-        markers=True,
-        labels={'threshold': 'Soglia (th)', 'avg_extinctions': 'Estinzioni Secondarie Medie'}
-    )
+    # Calcola range y dinamico (come nel notebook)
+    all_values = list(df['r_alpha_random']) + list(df['r_alpha_most'])
+    y_min = min(all_values)
+    y_max = max(all_values)
+    margin = (y_max - y_min) * 0.1 if y_max > y_min else 0.05
     
-    fig.update_traces(
-        line=dict(color='#34C759', width=3),
-        marker=dict(size=10, color='#34C759')
-    )
+    fig = go.Figure()
+    
+    # Curva Random
+    fig.add_trace(go.Scatter(
+        x=df['threshold'],
+        y=df['r_alpha_random'],
+        mode='lines+markers',
+        name='Random',
+        line=dict(color='#007AFF', width=3),
+        marker=dict(size=10, color='#007AFF')
+    ))
+    
+    # Curva Most Connected
+    fig.add_trace(go.Scatter(
+        x=df['threshold'],
+        y=df['r_alpha_most'],
+        mode='lines+markers',
+        name='Most Connected',
+        line=dict(color='#FF3B30', width=3),
+        marker=dict(size=10, color='#FF3B30')
+    ))
     
     fig.update_layout(
+        xaxis_title='Soglia Energetica (th)',
+        yaxis_title='Robustezza (R<sub>α</sub>)',
         paper_bgcolor='#ffffff',
         plot_bgcolor='#fafafa',
         font=dict(color='#1d1d1f'),
         xaxis=dict(gridcolor='#e5e5e7'),
-        yaxis=dict(gridcolor='#e5e5e7'),
-        height=300
+        yaxis=dict(gridcolor='#e5e5e7', range=[max(0, y_min - margin), min(1, y_max + margin)]),
+        height=350,
+        legend=dict(
+            orientation='h',
+            yanchor='bottom',
+            y=1.02,
+            xanchor='center',
+            x=0.5
+        )
     )
     
     return fig
@@ -705,26 +803,37 @@ def main():
                     st.dataframe(df_keystone, use_container_width=True)
         
         with col2:
-            st.markdown("#### Curva di Robustezza")
-            if st.button("📊 Calcola", use_container_width=True):
-                with st.spinner("Calcolando..."):
+            st.markdown("#### Curva di Robustezza (R<sub>α</sub>)", unsafe_allow_html=True)
+            
+            # Slider per alpha
+            alpha = st.slider(
+                "α (% rete da estinguere)",
+                min_value=0.1,
+                max_value=1.0,
+                value=0.5,
+                step=0.1,
+                help="Percentuale di rete che deve estinguersi per calcolare R_α. Es: α=0.5 → R₅₀"
+            )
+            
+            if st.button("📊 Calcola R_α", use_container_width=True):
+                with st.spinner(f"Calcolando R_{int(alpha*100)}..."):
                     thresholds = [0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
                     robustness_data = []
                     
                     for th in thresholds:
-                        impacts = []
-                        for n in G.nodes():
-                            if G.out_degree(n) > 0:
-                                cascade = simulate_extinction_cascade(G, [n], th)
-                                impacts.append(cascade['secondary_extinct'])
-                        avg_impact = np.mean(impacts) if impacts else 0
+                        r_random = calculate_R_alpha(G, th, alpha=alpha, strategy='random', simulations=5)
+                        r_most = calculate_R_alpha(G, th, alpha=alpha, strategy='most')
                         robustness_data.append({
                             'threshold': th,
-                            'avg_extinctions': round(avg_impact, 2)
+                            'r_alpha_random': round(r_random, 3),
+                            'r_alpha_most': round(r_most, 3)
                         })
                     
                     fig = create_robustness_chart(robustness_data)
                     st.plotly_chart(fig, use_container_width=True)
+                    
+                    # Mostra interpretazione
+                    st.caption(f"R_α = frazione di estinzioni primarie per causare {int(alpha*100)}% di estinzioni. Valori alti = rete robusta.")
     
     else:
         # Welcome screen - Apple style
