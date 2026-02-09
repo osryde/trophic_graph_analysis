@@ -833,7 +833,7 @@ def main():
                     st.plotly_chart(fig, use_container_width=True)
                     
                     # Mostra interpretazione
-                    st.caption(f"R_α = frazione di estinzioni primarie per causare {int(alpha*100)}% di estinzioni. Valori alti = rete robusta.")
+                    st.caption(f"R_α = frazione di estinzioni primarie per causare α% di estinzioni. Valori alti = rete robusta.")
     
     else:
         # Welcome screen - Apple style
